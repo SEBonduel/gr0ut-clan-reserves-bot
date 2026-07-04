@@ -99,8 +99,12 @@ const ephemeral = (content) =>
     data: { content, flags: InteractionResponseFlags.EPHEMERAL },
   });
 
-const isOfficer = (interaction, env) =>
-  (interaction.member?.roles || []).includes(env.OFFICER_ROLE_ID);
+// OFFICER_ROLE_IDS = un ou plusieurs id de rôles séparés par des virgules.
+const isOfficer = (interaction, env) => {
+  const allowed = (env.OFFICER_ROLE_IDS || "").split(",").map((s) => s.trim());
+  const roles = interaction.member?.roles || [];
+  return roles.some((r) => allowed.includes(r));
+};
 
 /** Construit le message avec un bouton par réserve disponible. */
 function reservesMessage(payload, env) {

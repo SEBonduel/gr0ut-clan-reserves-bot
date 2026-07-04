@@ -16,6 +16,6 @@ crons = ["0 6 * * *"]
 
 # Variables NON secrètes. Les secrets se posent avec `wrangler secret put NOM` :
 #   WG_APP_ID, DISCORD_PUBLIC_KEY, DISCORD_TOKEN, DISCORD_APP_ID,
-#   OFFICER_ROLE_ID, CLAN_ID, LOGIN_SECRET
+#   OFFICER_ROLE_IDS (id séparés par des virgules), CLAN_ID, LOGIN_SECRET
 [vars]
 WG_REGION = "eu"

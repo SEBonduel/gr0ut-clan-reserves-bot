@@ -23,7 +23,7 @@ via Cloudflare Workers.
 |---|---|
 | `DISCORD_APP_ID`, `DISCORD_PUBLIC_KEY`, `DISCORD_TOKEN` | https://discord.com/developers/applications → *New Application* → onglet *Bot* (token) et *General Information* (App ID + Public Key) |
 | `GUILD_ID` | Discord (mode développeur activé) → clic droit sur le serveur → *Copier l'identifiant* |
-| `OFFICER_ROLE_ID` | Paramètres serveur → Rôles → clic droit sur le rôle officier → *Copier l'identifiant* |
+| `OFFICER_ROLE_IDS` | Paramètres serveur → Rôles → clic droit sur chaque rôle officier → *Copier l'identifiant* (plusieurs, séparés par des virgules) |
 | `WG_APP_ID` | `00eed50e0468215e87ec936f17c52d8f` (déjà créé) |
 | `CLAN_ID` | `500165786` (GR0UT) |
 | `LOGIN_SECRET` | invente une chaîne aléatoire (protège le lien de login) |
@@ -44,7 +44,7 @@ npx wrangler secret put WG_APP_ID          # 00eed50e0468215e87ec936f17c52d8f
 npx wrangler secret put DISCORD_PUBLIC_KEY
 npx wrangler secret put DISCORD_TOKEN
 npx wrangler secret put DISCORD_APP_ID
-npx wrangler secret put OFFICER_ROLE_ID
+npx wrangler secret put OFFICER_ROLE_IDS    # id de rôles séparés par des virgules
 npx wrangler secret put CLAN_ID            # 500165786
 npx wrangler secret put LOGIN_SECRET
 ```
@@ -89,5 +89,5 @@ ou niveaux paraissent faux, envoie-moi la réponse brute de l'API et j'ajuste
 - Le token WG expire ~2 semaines ; le cron quotidien le renouvelle. Si personne
   ne l'utilise très longtemps et qu'il expire quand même, il suffit de refaire
   l'étape 5.
-- Sécurité : seul le rôle `OFFICER_ROLE_ID` peut déclencher les boutons ; le
+- Sécurité : seuls les rôles listés dans `OFFICER_ROLE_IDS` peuvent déclencher les boutons ; le
   lien de login est protégé par `LOGIN_SECRET`.
