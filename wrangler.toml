@@ -7,7 +7,7 @@ compatibility_flags = ["nodejs_compat"]
 # Colle l'id renvoyé ci-dessous.
 [[kv_namespaces]]
 binding = "TOKENS"
-id = "REMPLACER_PAR_ID_KV"
+id = "e8d3f6a1a0ab41bbbe46b8bd0ebe1cf7"
 
 # Renouvellement automatique du token WG (prolongate) chaque jour à 06:00 UTC.
 [triggers]
