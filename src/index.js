@@ -33,10 +33,10 @@ const wgBase = (env) => WG_HOSTS[env.WG_REGION] || WG_HOSTS.eu;
 
 /** Libellés FR + emoji par type de réserve (fallback = nom renvoyé par l'API). */
 const RESERVE_LABELS = {
-  COMBAT_PAYMENTS: "💰 Crédits",
+  BATTLE_PAYMENTS: "💰 Crédits",
   TACTICAL_TRAINING: "⭐ XP véhicule",
-  MILITARY_EXERCISES: "🎖️ XP équipage",
-  ADDITIONAL_BRIEFING: "📘 XP libre",
+  ADDITIONAL_BRIEFING: "🎖️ XP équipage",
+  MILITARY_MANEUVERS: "📘 XP libre",
 };
 
 async function wgGetReserves(env, token) {
@@ -106,58 +106,118 @@ const isOfficer = (interaction, env) => {
   return roles.some((r) => allowed.includes(r));
 };
 
-/** Construit le message avec un bouton par réserve disponible. */
-function reservesMessage(payload, env) {
-  const list = payload?.data?.[env.CLAN_ID] || [];
-  if (!Array.isArray(list) || list.length === 0) {
-    return { content: "Aucune réserve de clan disponible pour le moment." };
+/**
+ * Construit le message d'état des réserves + boutons.
+ * `data` est une LISTE de réserves ; chacune a `in_stock` = niveaux, avec un
+ * `status` par niveau : "active" (en cours), "cannot_be_activated" (bloqué),
+ * ou autre/null (activable). On ne pilote que les boosters de clan
+ * (disposable=false) : crédits / XP / XP équipage / XP libre.
+ */
+function reservesMessage(payload) {
+  const list = Array.isArray(payload?.data) ? payload.data : [];
+  const boosters = list.filter((r) => r.disposable === false);
+  if (!boosters.length) {
+    return { content: "Aucune réserve de clan pilotable pour le moment." };
   }
+
+  const lines = [];
   const rows = [];
   let row = { type: 1, components: [] };
-  for (const res of list) {
-    // Champs défensifs : l'API renvoie type + (level|levels) + in_stock/name.
-    const type = res.type || res.reserve_type;
-    const level = res.level ?? res.reserve_level ?? 1;
-    const stock = res.in_stock ?? res.count ?? "?";
-    const label = `${RESERVE_LABELS[type] || res.name || type} (niv ${level})`;
-    row.components.push({
-      type: 2, // button
-      style: 1, // primary
-      label: `${label} · x${stock}`,
-      custom_id: `ask:${type}:${level}`,
-    });
+  const pushBtn = (btn) => {
     if (row.components.length === 5) {
       rows.push(row);
       row = { type: 1, components: [] };
     }
+    row.components.push(btn);
+  };
+
+  for (const r of boosters) {
+    const name = RESERVE_LABELS[r.type] || r.name;
+    const stock = r.in_stock || [];
+    const active = stock.find((s) => s.status === "active");
+    if (active) {
+      lines.push(`✅ **${name}** — déjà en cours (niveau ${active.level})`);
+      continue;
+    }
+    const usableLevels = stock.filter(
+      (s) =>
+        s.status !== "active" &&
+        s.status !== "cannot_be_activated" &&
+        (s.amount ?? 0) > 0
+    );
+    if (usableLevels.length) {
+      const niv = usableLevels.map((s) => s.level).join(", ");
+      lines.push(`▶️ **${name}** — disponible (niveaux ${niv})`);
+      pushBtn({
+        type: 2,
+        style: 1,
+        label: name,
+        custom_id: `lvl:${r.type}`,
+      });
+    } else {
+      const total = stock.reduce((n, s) => n + (s.amount || 0), 0);
+      lines.push(
+        `⛔ **${name}** — activation impossible maintenant (x${total} en stock)`
+      );
+    }
   }
   if (row.components.length) rows.push(row);
-  return {
-    content: "🏰 **Réserves de clan disponibles** — clique pour activer :",
-    components: rows.slice(0, 5),
+
+  const out = {
+    content:
+      "🏰 **Réserves de clan**\n" +
+      lines.join("\n") +
+      (rows.length ? "\n\nClique pour activer :" : ""),
   };
+  if (rows.length) out.components = rows.slice(0, 5);
+  return out;
 }
 
-const confirmMessage = (type, level) => ({
-  content: `⚠️ Confirmer l'activation de **${
-    RESERVE_LABELS[type] || type
-  }** (niveau ${level}) ? Cela consomme une réserve du clan.`,
-  flags: InteractionResponseFlags.EPHEMERAL,
-  components: [
-    {
-      type: 1,
-      components: [
-        {
-          type: 2,
-          style: 4, // danger
-          label: "✅ Confirmer l'activation",
-          custom_id: `do:${type}:${level}`,
-        },
-        { type: 2, style: 2, label: "Annuler", custom_id: "cancel" },
-      ],
-    },
-  ],
-});
+/** Bonus principal (batailles de clan) + durée d'un niveau de réserve. */
+function bonusLabel(stockLevel) {
+  const bv = stockLevel.bonus_values || [];
+  const clan = bv.find((b) => /Clan/i.test(b.battle_type)) || bv[0];
+  const dur = stockLevel.action_time
+    ? `${Math.round(stockLevel.action_time / 3600)}h`
+    : "";
+  return [clan ? `x${clan.value}` : "", dur].filter(Boolean).join(" · ");
+}
+
+/** Message éphémère : un bouton par niveau activable (le clic = activation). */
+function levelChoiceMessage(reserve) {
+  const name = RESERVE_LABELS[reserve.type] || reserve.name;
+  const levels = (reserve.in_stock || []).filter(
+    (s) =>
+      s.status !== "active" &&
+      s.status !== "cannot_be_activated" &&
+      (s.amount ?? 0) > 0
+  );
+  if (!levels.length) {
+    return {
+      content: `⚠️ **${name}** n'est plus activable pour le moment.`,
+      flags: InteractionResponseFlags.EPHEMERAL,
+    };
+  }
+  const btns = levels.slice(0, 5).map((s) => ({
+    type: 2,
+    style: 4, // danger : le clic déclenche l'activation réelle
+    label: `Niv ${s.level} · ${bonusLabel(s)} (x${s.amount})`,
+    custom_id: `do:${reserve.type}:${s.level}`,
+  }));
+  return {
+    content: `⚠️ **${name}** — choisis le niveau à activer (cela **consomme** une réserve du clan) :`,
+    flags: InteractionResponseFlags.EPHEMERAL,
+    components: [
+      { type: 1, components: btns },
+      {
+        type: 1,
+        components: [
+          { type: 2, style: 2, label: "Annuler", custom_id: "cancel" },
+        ],
+      },
+    ],
+  };
+}
 
 // --- Traitement des interactions --------------------------------------------
 
@@ -187,7 +247,7 @@ async function handleInteraction(interaction, env) {
     }
     return json({
       type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-      data: reservesMessage(payload, env),
+      data: reservesMessage(payload),
     });
   }
 
@@ -205,12 +265,18 @@ async function handleInteraction(interaction, env) {
       });
     }
 
-    // 1er clic : demander confirmation.
-    if (id.startsWith("ask:")) {
-      const [, type, level] = id.split(":");
+    // 1er clic : afficher les niveaux activables de cette réserve.
+    if (id.startsWith("lvl:")) {
+      const [, type] = id.split(":");
+      const token = await getToken(env);
+      const payload = await wgGetReserves(env, token.access_token);
+      const reserve = (Array.isArray(payload.data) ? payload.data : []).find(
+        (r) => r.type === type
+      );
+      if (!reserve) return ephemeral("Réserve introuvable (relance /reserves).");
       return json({
         type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-        data: confirmMessage(type, level),
+        data: levelChoiceMessage(reserve),
       });
     }
 
