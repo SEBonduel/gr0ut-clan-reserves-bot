@@ -1,0 +1,20 @@
+name = "gr0ut-clan-reserves"
+main = "src/index.js"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+# Stockage du token WG (créé via : wrangler kv namespace create TOKENS)
+# Colle l'id renvoyé ci-dessous.
+[[kv_namespaces]]
+binding = "TOKENS"
+id = "REMPLACER_PAR_ID_KV"
+
+# Renouvellement automatique du token WG (prolongate) chaque jour à 06:00 UTC.
+[triggers]
+crons = ["0 6 * * *"]
+
+# Variables NON secrètes. Les secrets se posent avec `wrangler secret put NOM` :
+#   WG_APP_ID, DISCORD_PUBLIC_KEY, DISCORD_TOKEN, DISCORD_APP_ID,
+#   OFFICER_ROLE_ID, CLAN_ID, LOGIN_SECRET
+[vars]
+WG_REGION = "eu"
