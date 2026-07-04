@@ -2,6 +2,7 @@ name = "gr0ut-clan-reserves"
 main = "src/index.js"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
+workers_dev = true
 
 # Stockage du token WG (créé via : wrangler kv namespace create TOKENS)
 # Colle l'id renvoyé ci-dessous.
