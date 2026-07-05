@@ -340,6 +340,50 @@ async function authCallback(env, url) {
   );
 }
 
+// --- Surveillance : réserve redevenue activable -----------------------------
+
+/** Types de boosters actuellement activables (ni en cours, ni bloqués). */
+function activatableTypes(payload) {
+  const list = Array.isArray(payload?.data) ? payload.data : [];
+  const out = [];
+  for (const r of list) {
+    if (r.disposable !== false) continue; // on ignore les consommables
+    const stock = r.in_stock || [];
+    if (stock.some((s) => s.status === "active")) continue; // déjà en cours
+    const usable = stock.some(
+      (s) =>
+        s.status !== "active" &&
+        s.status !== "cannot_be_activated" &&
+        (s.amount ?? 0) > 0
+    );
+    if (usable) out.push(r.type);
+  }
+  return out;
+}
+
+/** Compare aux activables précédents ; notifie celles qui redeviennent dispo. */
+async function checkReserveSlots(env, token) {
+  if (!env.RESERVES_WEBHOOK_URL) return;
+  const payload = await wgGetReserves(env, token.access_token);
+  if (payload.status !== "ok") return;
+
+  const current = activatableTypes(payload);
+  const prev = (await env.TOKENS.get("reserve_activatable", "json")) || [];
+  await env.TOKENS.put("reserve_activatable", JSON.stringify(current));
+
+  const fresh = current.filter((t) => !prev.includes(t));
+  if (!fresh.length) return;
+
+  const names = fresh.map((t) => RESERVE_LABELS[t] || t).join(", ");
+  await fetch(env.RESERVES_WEBHOOK_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      content: `💡 Réserve(s) de nouveau activable(s) : **${names}** — un créneau s'est libéré, utilisez \`/reserves\` pour l'activer.`,
+    }),
+  });
+}
+
 // --- Entrées du Worker -------------------------------------------------------
 
 export default {
@@ -364,10 +408,18 @@ export default {
     return new Response("GR0UT clan-reserves bot OK", { status: 200 });
   },
 
-  // Cron : renouvelle le token WG pour qu'il n'expire pas (~2 semaines sinon).
+  // Crons : renouvellement quotidien du token + surveillance des réserves.
   async scheduled(event, env, ctx) {
     const token = await getToken(env);
     if (!token?.access_token) return;
+
+    // Les crons fréquents (≠ 06:00) servent à repérer les réserves activables.
+    if (event.cron !== "0 6 * * *") {
+      await checkReserveSlots(env, token);
+      return;
+    }
+
+    // Cron quotidien : prolonge le token pour qu'il n'expire pas (~2 sem).
     const res = await wgProlongate(env, token.access_token);
     if (res.status === "ok" && res.data?.access_token) {
       await saveToken(env, {

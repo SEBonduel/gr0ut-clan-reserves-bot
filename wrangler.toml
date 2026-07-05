@@ -10,9 +10,10 @@ workers_dev = true
 binding = "TOKENS"
 id = "e8d3f6a1a0ab41bbbe46b8bd0ebe1cf7"
 
-# Renouvellement automatique du token WG (prolongate) chaque jour à 06:00 UTC.
+# 06:00 UTC : renouvellement du token WG. Toutes les 30 min le soir : détection
+# des réserves qui redeviennent activables (notif Discord).
 [triggers]
-crons = ["0 6 * * *"]
+crons = ["0 6 * * *", "*/30 16-22 * * *"]
 
 # Variables NON secrètes. Les secrets se posent avec `wrangler secret put NOM` :
 #   WG_APP_ID, DISCORD_PUBLIC_KEY, DISCORD_TOKEN, DISCORD_APP_ID,
