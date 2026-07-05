@@ -287,10 +287,18 @@ async function handleInteraction(interaction, env) {
       const res = await wgActivateReserve(env, token.access_token, type, level);
       const who = interaction.member?.user?.username || "un officier";
       if (res.status === "ok") {
+        // On re-liste les réserves en cours pour la confirmation.
+        let enCours = [];
+        try {
+          enCours = activeReservesList(await wgGetReserves(env, token.access_token));
+        } catch (e) { /* on garde la confirmation même si la relecture échoue */ }
+        const liste = enCours.length ? enCours.join("\n") : "_aucune pour le moment_";
         return json({
           type: InteractionResponseType.UPDATE_MESSAGE,
           data: {
-            content: `✅ **${RESERVE_LABELS[type] || type}** (niv ${level}) activée par **${who}**.`,
+            content:
+              `✅ **Réserve activée** : ${RESERVE_LABELS[type] || type} (niveau ${level}) — par **${who}**.\n\n` +
+              `**Réserves en cours :**\n${liste}`,
             components: [],
           },
         });
@@ -359,6 +367,18 @@ function activatableTypes(payload) {
     if (usable) out.push(r.type);
   }
   return out;
+}
+
+/** Liste lisible des réserves actuellement en cours. */
+function activeReservesList(payload) {
+  const list = Array.isArray(payload?.data) ? payload.data : [];
+  const active = [];
+  for (const r of list) {
+    if (r.disposable !== false) continue;
+    const a = (r.in_stock || []).find((s) => s.status === "active");
+    if (a) active.push(`🟢 **${RESERVE_LABELS[r.type] || r.name}** (niveau ${a.level})`);
+  }
+  return active;
 }
 
 /** Compare aux activables précédents ; notifie celles qui redeviennent dispo. */
