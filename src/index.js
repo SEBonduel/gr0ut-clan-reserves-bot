@@ -502,10 +502,32 @@ async function checkReserveSlots(env, clan, token) {
  * samedi (été/hiver) et on ne poste que si l'heure de Paris vaut bien 19h. Un
  * verrou par date (KV) évite tout doublon.
  */
-async function maybeSendWarGamesWarning(env) {
+/** Poste réellement le message (mention officiers), sans aucune garde. */
+async function sendWarGamesMessage(env) {
   const webhook = env.WARGAMES_WEBHOOK_URL || env.RESERVES_WEBHOOK_URL;
-  if (!webhook) return;
+  if (!webhook) {
+    return { ok: false, reason: "Aucun webhook (WARGAMES_WEBHOOK_URL / RESERVES_WEBHOOK_URL)." };
+  }
+  const roleIds = (env.OFFICER_ROLE_IDS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const mentions = roleIds.map((r) => `<@&${r}>`).join(" ");
+  const r = await fetch(webhook, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      content:
+        `${mentions}\n🚨 **ATTENTION, CE SOIR JEUX DE GUERRE** 🚨\n` +
+        `AUCUNE RÉSERVE NE DOIT ÊTRE MISE AVANT 22H (tier 12 uniquement).`,
+      allowed_mentions: { roles: roleIds },
+    }),
+  });
+  return { ok: r.ok, status: r.status, roles: roleIds.length };
+}
 
+/** Garde : ne poste qu'au samedi 19h Paris, une seule fois (verrou KV par date). */
+async function maybeSendWarGamesWarning(env) {
   const parts = new Intl.DateTimeFormat("en-GB", {
     timeZone: "Europe/Paris",
     weekday: "short",
@@ -518,26 +540,11 @@ async function maybeSendWarGamesWarning(env) {
   const get = (t) => parts.find((p) => p.type === t)?.value;
   if (get("weekday") !== "Sat" || parseInt(get("hour"), 10) !== 19) return;
 
-  // Anti-doublon : une seule annonce par date.
   const dateKey = `${get("year")}-${get("month")}-${get("day")}`;
   if ((await env.TOKENS.get("wargames_warned")) === dateKey) return;
   await env.TOKENS.put("wargames_warned", dateKey);
 
-  const roleIds = (env.OFFICER_ROLE_IDS || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const mentions = roleIds.map((r) => `<@&${r}>`).join(" ");
-  await fetch(webhook, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      content:
-        `${mentions}\n🚨 **ATTENTION, CE SOIR JEUX DE GUERRE** 🚨\n` +
-        `AUCUNE RÉSERVE NE DOIT ÊTRE MISE AVANT 22H (tier 12 uniquement).`,
-      allowed_mentions: { roles: roleIds },
-    }),
-  });
+  await sendWarGamesMessage(env);
 }
 
 // --- Entrées du Worker -------------------------------------------------------
