@@ -494,6 +494,52 @@ async function checkReserveSlots(env, clan, token) {
   });
 }
 
+// --- Rappel "Jeux de guerre" (samedi 19h Paris) -----------------------------
+
+/**
+ * Poste un rappel mentionnant les officiers, uniquement le samedi à 19h HEURE DE
+ * PARIS. Les crons Cloudflare sont en UTC ; on déclenche à 17:00 et 18:00 UTC le
+ * samedi (été/hiver) et on ne poste que si l'heure de Paris vaut bien 19h. Un
+ * verrou par date (KV) évite tout doublon.
+ */
+async function maybeSendWarGamesWarning(env) {
+  const webhook = env.WARGAMES_WEBHOOK_URL || env.RESERVES_WEBHOOK_URL;
+  if (!webhook) return;
+
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Paris",
+    weekday: "short",
+    hour: "2-digit",
+    hour12: false,
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+  }).formatToParts(new Date());
+  const get = (t) => parts.find((p) => p.type === t)?.value;
+  if (get("weekday") !== "Sat" || parseInt(get("hour"), 10) !== 19) return;
+
+  // Anti-doublon : une seule annonce par date.
+  const dateKey = `${get("year")}-${get("month")}-${get("day")}`;
+  if ((await env.TOKENS.get("wargames_warned")) === dateKey) return;
+  await env.TOKENS.put("wargames_warned", dateKey);
+
+  const roleIds = (env.OFFICER_ROLE_IDS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const mentions = roleIds.map((r) => `<@&${r}>`).join(" ");
+  await fetch(webhook, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      content:
+        `${mentions}\n🚨 **ATTENTION, CE SOIR JEUX DE GUERRE** 🚨\n` +
+        `AUCUNE RÉSERVE NE DOIT ÊTRE MISE AVANT 22H (tier 12 uniquement).`,
+      allowed_mentions: { roles: roleIds },
+    }),
+  });
+}
+
 // --- Entrées du Worker -------------------------------------------------------
 
 export default {
@@ -525,8 +571,14 @@ export default {
     return new Response("GR0UT clan-reserves bot OK", { status: 200 });
   },
 
-  // Crons : renouvellement quotidien des tokens + surveillance, pour chaque clan.
+  // Crons : rappel Jeux de guerre (samedi) + renouvellement/surveillance par clan.
   async scheduled(event, env, ctx) {
+    // Rappel "Jeux de guerre" : crons du samedi 17:00/18:00 UTC (poste à 19h Paris).
+    if (event.cron === "0 17 * * 6" || event.cron === "0 18 * * 6") {
+      await maybeSendWarGamesWarning(env);
+      return;
+    }
+
     for (const clan of getClans(env)) {
       const token = await getToken(env, clan.key);
       if (!token?.access_token) continue;
