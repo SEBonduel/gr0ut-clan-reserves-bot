@@ -66,16 +66,24 @@ Note l'URL du Worker (ex. `https://gr0ut-clan-reserves.<toi>.workers.dev`).
 - Inviter le bot sur le serveur (onglet *OAuth2 → URL Generator* : scopes
   `bot` + `applications.commands`).
 
-### 5. Lier le compte Wargaming (un officier, une fois)
-Ouvre dans ton navigateur :
+### 5. Lier les comptes Wargaming (un par clan, une fois)
+Le bot gère **plusieurs clans** ; chaque clan a son propre compte WG à lier.
+Ouvre dans ton navigateur, **un lien par clan** (le paramètre `clan` est obligatoire) :
 ```
-https://…workers.dev/auth/login?key=<LOGIN_SECRET>
+https://…workers.dev/auth/login?key=<LOGIN_SECRET>&clan=GR0UT
+https://…workers.dev/auth/login?key=<LOGIN_SECRET>&clan=GR0VT
 ```
-→ connexion WG → le token est stocké. C'est ce compte (avec le droit clan
-d'activer les réserves) qui servira pour toutes les activations.
+→ connexion WG avec le compte membre du clan concerné → le token est stocké **par
+clan**. Chaque compte doit avoir le droit d'activer les réserves de son clan.
+
+> Clans par défaut : **GR0UT** (`500165786`) et **GR0VT** (`500135793`). Pour en
+> changer, définis le secret/var `CLANS` (JSON) :
+> `[{"key":"GR0UT","clan_id":"500165786"},{"key":"GR0VT","clan_id":"500135793"}]`.
 
 ### 6. Utiliser
-Dans le salon « Réserves » : `/reserves` → boutons → confirmation → activation.
+Dans le salon « Réserves » : `/reserves` → **choix du clan** → choix de la réserve
+→ choix du niveau → activation. (Avec un seul clan configuré, l'étape de choix du
+clan est sautée automatiquement.)
 
 ## À vérifier au premier `/reserves`
 Je n'ai pas pu voir la **structure exacte** renvoyée par `clanreserves`

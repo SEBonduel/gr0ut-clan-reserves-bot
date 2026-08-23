@@ -1,16 +1,22 @@
 /**
  * GR0UT — Bot d'activation des réserves de clan (Cloudflare Worker).
  *
+ * Multi-clans : on choisit d'abord le clan (GR0UT / GR0VT...), puis la réserve,
+ * puis le niveau. Chaque clan a son propre compte WG (donc son propre token).
+ *
  * Trois rôles :
- *  1. Endpoint d'interactions Discord (POST /interactions) : commande /reserves
- *     + boutons -> active une réserve via l'API Wargaming.
- *  2. Flux d'auth WG (GET /auth/login -> /auth/callback) : un officier se logue
- *     une fois, on stocke son access_token dans KV.
- *  3. Cron quotidien : renouvelle (prolongate) le token pour qu'il n'expire pas.
+ *  1. Endpoint d'interactions Discord (POST /interactions) : /reserves
+ *     -> choix du clan -> choix de la réserve -> choix du niveau -> activation.
+ *  2. Flux d'auth WG (GET /auth/login?key=...&clan=GR0UT -> /auth/callback/GR0UT) :
+ *     un officier logue le compte de CHAQUE clan une fois ; token stocké par clan.
+ *  3. Cron : prolonge chaque token + surveille les réserves de chaque clan.
  *
  * Secrets attendus (wrangler secret put ...):
  *   WG_APP_ID, DISCORD_PUBLIC_KEY, DISCORD_TOKEN, DISCORD_APP_ID,
- *   OFFICER_ROLE_ID, CLAN_ID, LOGIN_SECRET
+ *   OFFICER_ROLE_IDS, LOGIN_SECRET
+ *   CLANS  = JSON [{"key":"GR0UT","clan_id":"500165786"},{"key":"GR0VT","clan_id":"500135793"}]
+ *           (si absent -> valeurs par défaut GR0UT + GR0VT ci-dessous ;
+ *            CLAN_ID reste accepté comme clan_id du clan primaire)
  * Binding KV : TOKENS. Var : WG_REGION (eu|na|asia).
  */
 
@@ -31,6 +37,22 @@ const WG_HOSTS = {
 
 const wgBase = (env) => WG_HOSTS[env.WG_REGION] || WG_HOSTS.eu;
 
+/** Clans gérés : [{key, clan_id, name?}]. Surchargeable via le secret JSON CLANS. */
+function getClans(env) {
+  if (env.CLANS) {
+    try {
+      const c = JSON.parse(env.CLANS);
+      if (Array.isArray(c) && c.length) return c;
+    } catch (_) { /* JSON invalide -> valeurs par défaut */ }
+  }
+  return [
+    { key: "GR0UT", clan_id: env.CLAN_ID || "500165786" },
+    { key: "GR0VT", clan_id: "500135793" },
+  ];
+}
+const findClan = (env, key) => getClans(env).find((c) => c.key === key) || null;
+const clanLabel = (c) => c.name || c.key;
+
 /** Libellés FR + emoji par type de réserve (fallback = nom renvoyé par l'API). */
 const RESERVE_LABELS = {
   BATTLE_PAYMENTS: "💰 Crédits",
@@ -39,17 +61,18 @@ const RESERVE_LABELS = {
   MILITARY_MANEUVERS: "📘 XP libre",
 };
 
-async function wgGetReserves(env, token) {
+async function wgGetReserves(env, token, clanId) {
   const url = new URL(`${wgBase(env)}/wot/stronghold/clanreserves/`);
   url.searchParams.set("application_id", env.WG_APP_ID);
   url.searchParams.set("access_token", token);
-  url.searchParams.set("clan_id", env.CLAN_ID);
+  url.searchParams.set("clan_id", clanId);
   const r = await fetch(url);
   return r.json();
 }
 
 async function wgActivateReserve(env, token, reserveType, reserveLevel) {
-  // Méthode "write" -> POST, paramètres dans le corps.
+  // Méthode "write" -> POST, paramètres dans le corps. Le clan visé est celui
+  // du compte propriétaire du token (donc implicite).
   const body = new URLSearchParams({
     application_id: env.WG_APP_ID,
     access_token: token,
@@ -77,13 +100,22 @@ async function wgProlongate(env, token) {
   return r.json();
 }
 
-// --- Stockage du token (KV) --------------------------------------------------
+// --- Stockage des tokens (KV), un par clan -----------------------------------
 
-const TOKEN_KEY = "wg_token";
+const tokenKey = (clanKey) => `wg_token:${clanKey}`;
 
-const getToken = (env) => env.TOKENS.get(TOKEN_KEY, "json");
-const saveToken = (env, data) =>
-  env.TOKENS.put(TOKEN_KEY, JSON.stringify(data));
+/** Token du clan. Compat : le clan primaire retombe sur l'ancien "wg_token". */
+async function getToken(env, clanKey) {
+  const t = await env.TOKENS.get(tokenKey(clanKey), "json");
+  if (t) return t;
+  const clans = getClans(env);
+  if (clans[0] && clans[0].key === clanKey) {
+    return env.TOKENS.get("wg_token", "json"); // ancien token unique
+  }
+  return null;
+}
+const saveToken = (env, clanKey, data) =>
+  env.TOKENS.put(tokenKey(clanKey), JSON.stringify(data));
 
 // --- Helpers Discord ---------------------------------------------------------
 
@@ -106,18 +138,32 @@ const isOfficer = (interaction, env) => {
   return roles.some((r) => allowed.includes(r));
 };
 
+/** 1re étape : boutons de choix du clan. */
+function clanChoiceMessage(env) {
+  const btns = getClans(env).slice(0, 5).map((c) => ({
+    type: 2,
+    style: 1,
+    label: clanLabel(c),
+    custom_id: `clan:${c.key}`,
+  }));
+  return {
+    content: "🏰 **Réserves de clan** — pour quel clan veux-tu les activer ?",
+    components: [{ type: 1, components: btns }],
+  };
+}
+
 /**
- * Construit le message d'état des réserves + boutons.
+ * Message d'état des réserves + boutons (pour un clan donné).
  * `data` est une LISTE de réserves ; chacune a `in_stock` = niveaux, avec un
  * `status` par niveau : "active" (en cours), "cannot_be_activated" (bloqué),
- * ou autre/null (activable). On ne pilote que les boosters de clan
- * (disposable=false) : crédits / XP / XP équipage / XP libre.
+ * ou autre/null (activable). On ne pilote que les boosters (disposable=false).
  */
-function reservesMessage(payload) {
+function reservesMessage(payload, clanKey, clan) {
   const list = Array.isArray(payload?.data) ? payload.data : [];
   const boosters = list.filter((r) => r.disposable === false);
+  const header = `🏰 **Réserves — ${clanLabel(clan)}**\n`;
   if (!boosters.length) {
-    return { content: "Aucune réserve de clan pilotable pour le moment." };
+    return { content: header + "Aucune réserve de clan pilotable pour le moment." };
   }
 
   const lines = [];
@@ -152,7 +198,7 @@ function reservesMessage(payload) {
         type: 2,
         style: 1,
         label: name,
-        custom_id: `lvl:${r.type}`,
+        custom_id: `lvl:${clanKey}:${r.type}`,
       });
     } else {
       const total = stock.reduce((n, s) => n + (s.amount || 0), 0);
@@ -164,10 +210,7 @@ function reservesMessage(payload) {
   if (row.components.length) rows.push(row);
 
   const out = {
-    content:
-      "🏰 **Réserves de clan**\n" +
-      lines.join("\n") +
-      (rows.length ? "\n\nClique pour activer :" : ""),
+    content: header + lines.join("\n") + (rows.length ? "\n\nClique pour activer :" : ""),
   };
   if (rows.length) out.components = rows.slice(0, 5);
   return out;
@@ -184,7 +227,7 @@ function bonusLabel(stockLevel) {
 }
 
 /** Message éphémère : un bouton par niveau activable (le clic = activation). */
-function levelChoiceMessage(reserve) {
+function levelChoiceMessage(reserve, clanKey, clan) {
   const name = RESERVE_LABELS[reserve.type] || reserve.name;
   const levels = (reserve.in_stock || []).filter(
     (s) =>
@@ -202,10 +245,10 @@ function levelChoiceMessage(reserve) {
     type: 2,
     style: 4, // danger : le clic déclenche l'activation réelle
     label: `Niv ${s.level} · ${bonusLabel(s)} (x${s.amount})`,
-    custom_id: `do:${reserve.type}:${s.level}`,
+    custom_id: `do:${clanKey}:${reserve.type}:${s.level}`,
   }));
   return {
-    content: `⚠️ **${name}** — choisis le niveau à activer (cela **consomme** une réserve du clan) :`,
+    content: `⚠️ **${name}** (${clanLabel(clan)}) — choisis le niveau à activer (cela **consomme** une réserve du clan) :`,
     flags: InteractionResponseFlags.EPHEMERAL,
     components: [
       { type: 1, components: btns },
@@ -219,35 +262,53 @@ function levelChoiceMessage(reserve) {
   };
 }
 
+/** Récupère + construit le message des réserves d'un clan (ou {error}). */
+async function buildReservesData(env, clanKey) {
+  const clan = findClan(env, clanKey);
+  if (!clan) return { error: "Clan inconnu (relance /reserves)." };
+  const token = await getToken(env, clanKey);
+  if (!token?.access_token) {
+    return {
+      error:
+        `🔒 Aucun compte WG lié pour **${clanLabel(clan)}**. Un officier doit se ` +
+        `connecter via le lien d'auth de ce clan (voir README).`,
+    };
+  }
+  const payload = await wgGetReserves(env, token.access_token, clan.clan_id);
+  if (payload.status !== "ok") {
+    return {
+      error:
+        `Erreur API Wargaming (${clan.key}) : \`${payload.error?.message || "inconnue"}\`. ` +
+        "Le token a peut-être expiré (relogue le compte de ce clan).",
+    };
+  }
+  return { data: reservesMessage(payload, clanKey, clan) };
+}
+
 // --- Traitement des interactions --------------------------------------------
 
 async function handleInteraction(interaction, env) {
-  // Ping de vérification Discord.
   if (interaction.type === InteractionType.PING) {
     return json({ type: InteractionResponseType.PONG });
   }
 
-  // Commande /reserves : liste les réserves + boutons.
+  // Commande /reserves : choix du clan (ou direct si un seul clan).
   if (interaction.type === InteractionType.APPLICATION_COMMAND) {
     if (!isOfficer(interaction, env)) {
       return ephemeral("⛔ Réservé aux officiers du clan.");
     }
-    const token = await getToken(env);
-    if (!token?.access_token) {
-      return ephemeral(
-        "🔒 Aucun compte WG lié. Un officier doit d'abord se connecter via le lien d'auth (voir README)."
-      );
-    }
-    const payload = await wgGetReserves(env, token.access_token);
-    if (payload.status !== "ok") {
-      return ephemeral(
-        `Erreur API Wargaming : \`${payload.error?.message || "inconnue"}\`. ` +
-          "Le token a peut-être expiré (relogue-toi)."
-      );
+    const clans = getClans(env);
+    if (clans.length === 1) {
+      const r = await buildReservesData(env, clans[0].key);
+      if (r.error) return ephemeral(r.error);
+      return json({
+        type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+        data: r.data,
+      });
     }
     return json({
       type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-      data: reservesMessage(payload),
+      data: clanChoiceMessage(env),
     });
   }
 
@@ -265,40 +326,57 @@ async function handleInteraction(interaction, env) {
       });
     }
 
-    // 1er clic : afficher les niveaux activables de cette réserve.
+    // Étape 1 : clan choisi -> liste ses réserves.
+    if (id.startsWith("clan:")) {
+      const key = id.slice("clan:".length);
+      const r = await buildReservesData(env, key);
+      if (r.error) return ephemeral(r.error);
+      return json({ type: InteractionResponseType.UPDATE_MESSAGE, data: r.data });
+    }
+
+    // Étape 2 : réserve choisie -> niveaux activables.
     if (id.startsWith("lvl:")) {
-      const [, type] = id.split(":");
-      const token = await getToken(env);
-      const payload = await wgGetReserves(env, token.access_token);
+      const [, key, type] = id.split(":");
+      const clan = findClan(env, key);
+      const token = await getToken(env, key);
+      if (!clan || !token?.access_token) {
+        return ephemeral("Session expirée, relance /reserves.");
+      }
+      const payload = await wgGetReserves(env, token.access_token, clan.clan_id);
       const reserve = (Array.isArray(payload.data) ? payload.data : []).find(
         (r) => r.type === type
       );
       if (!reserve) return ephemeral("Réserve introuvable (relance /reserves).");
       return json({
         type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-        data: levelChoiceMessage(reserve),
+        data: levelChoiceMessage(reserve, key, clan),
       });
     }
 
-    // 2e clic : activer réellement.
+    // Étape 3 : niveau choisi -> activation réelle.
     if (id.startsWith("do:")) {
-      const [, type, level] = id.split(":");
-      const token = await getToken(env);
+      const [, key, type, level] = id.split(":");
+      const clan = findClan(env, key);
+      const token = await getToken(env, key);
+      if (!clan || !token?.access_token) {
+        return ephemeral("Session expirée, relance /reserves.");
+      }
       const res = await wgActivateReserve(env, token.access_token, type, level);
       const who = interaction.member?.user?.username || "un officier";
       if (res.status === "ok") {
-        // On re-liste les réserves en cours pour la confirmation.
         let enCours = [];
         try {
-          enCours = activeReservesList(await wgGetReserves(env, token.access_token));
+          enCours = activeReservesList(
+            await wgGetReserves(env, token.access_token, clan.clan_id)
+          );
         } catch (e) { /* on garde la confirmation même si la relecture échoue */ }
         const liste = enCours.length ? enCours.join("\n") : "_aucune pour le moment_";
         return json({
           type: InteractionResponseType.UPDATE_MESSAGE,
           data: {
             content:
-              `✅ **Réserve activée** : ${RESERVE_LABELS[type] || type} (niveau ${level}) — par **${who}**.\n\n` +
-              `**Réserves en cours :**\n${liste}`,
+              `✅ **Réserve activée** (${clanLabel(clan)}) : ${RESERVE_LABELS[type] || type} ` +
+              `(niveau ${level}) — par **${who}**.\n\n**Réserves en cours :**\n${liste}`,
             components: [],
           },
         });
@@ -306,7 +384,7 @@ async function handleInteraction(interaction, env) {
       return json({
         type: InteractionResponseType.UPDATE_MESSAGE,
         data: {
-          content: `❌ Échec : \`${res.error?.message || "erreur inconnue"}\`.`,
+          content: `❌ Échec (${clan.key}) : \`${res.error?.message || "erreur inconnue"}\`.`,
           components: [],
         },
       });
@@ -319,11 +397,19 @@ async function handleInteraction(interaction, env) {
 // --- Flux d'authentification Wargaming --------------------------------------
 
 function authLoginRedirect(env, url) {
-  // Protège le lien par un secret pour éviter qu'un inconnu ne lie son compte.
+  // Protège le lien par un secret + exige le clan à lier.
   if (url.searchParams.get("key") !== env.LOGIN_SECRET) {
     return new Response("Forbidden", { status: 403 });
   }
-  const redirectUri = `${url.origin}/auth/callback`;
+  const clanKey = url.searchParams.get("clan");
+  if (!findClan(env, clanKey)) {
+    const keys = getClans(env).map((c) => c.key).join(", ");
+    return new Response(
+      `Paramètre 'clan' manquant ou inconnu. Utilise ?key=<secret>&clan=<${keys}>`,
+      { status: 400 }
+    );
+  }
+  const redirectUri = `${url.origin}/auth/callback/${clanKey}`;
   const login = new URL(`${wgBase(env)}/wot/auth/login/`);
   login.searchParams.set("application_id", env.WG_APP_ID);
   login.searchParams.set("redirect_uri", redirectUri);
@@ -331,19 +417,22 @@ function authLoginRedirect(env, url) {
   return Response.redirect(login.toString(), 302);
 }
 
-async function authCallback(env, url) {
+async function authCallback(env, url, clanKey) {
+  if (!findClan(env, clanKey)) {
+    return new Response("Clan inconnu.", { status: 400 });
+  }
   const status = url.searchParams.get("status");
   if (status !== "ok") {
     return new Response("Connexion Wargaming refusée.", { status: 400 });
   }
-  await saveToken(env, {
+  await saveToken(env, clanKey, {
     access_token: url.searchParams.get("access_token"),
     account_id: url.searchParams.get("account_id"),
     nickname: url.searchParams.get("nickname"),
     expires_at: Number(url.searchParams.get("expires_at")) || null,
   });
   return new Response(
-    "✅ Compte Wargaming lié. Tu peux fermer cette page et utiliser /reserves sur Discord.",
+    `✅ Compte Wargaming lié pour ${clanKey}. Tu peux fermer cette page et utiliser /reserves sur Discord.`,
     { headers: { "content-type": "text/plain; charset=utf-8" } }
   );
 }
@@ -381,15 +470,16 @@ function activeReservesList(payload) {
   return active;
 }
 
-/** Compare aux activables précédents ; notifie celles qui redeviennent dispo. */
-async function checkReserveSlots(env, token) {
+/** Compare aux activables précédents d'un clan ; notifie celles redevenues dispo. */
+async function checkReserveSlots(env, clan, token) {
   if (!env.RESERVES_WEBHOOK_URL) return;
-  const payload = await wgGetReserves(env, token.access_token);
+  const payload = await wgGetReserves(env, token.access_token, clan.clan_id);
   if (payload.status !== "ok") return;
 
   const current = activatableTypes(payload);
-  const prev = (await env.TOKENS.get("reserve_activatable", "json")) || [];
-  await env.TOKENS.put("reserve_activatable", JSON.stringify(current));
+  const kvKey = `reserve_activatable:${clan.key}`;
+  const prev = (await env.TOKENS.get(kvKey, "json")) || [];
+  await env.TOKENS.put(kvKey, JSON.stringify(current));
 
   const fresh = current.filter((t) => !prev.includes(t));
   if (!fresh.length) return;
@@ -399,7 +489,7 @@ async function checkReserveSlots(env, token) {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      content: `💡 Réserve(s) de nouveau activable(s) : **${names}** — un créneau s'est libéré, utilisez \`/reserves\` pour l'activer.`,
+      content: `💡 **[${clan.key}]** Réserve(s) de nouveau activable(s) : **${names}** — utilisez \`/reserves\` (clan ${clan.key}).`,
     }),
   });
 }
@@ -411,7 +501,14 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === "/auth/login") return authLoginRedirect(env, url);
-    if (url.pathname === "/auth/callback") return authCallback(env, url);
+    if (url.pathname.startsWith("/auth/callback/")) {
+      const clanKey = decodeURIComponent(url.pathname.slice("/auth/callback/".length));
+      return authCallback(env, url, clanKey);
+    }
+    // Compat : ancien callback sans clan -> clan primaire.
+    if (url.pathname === "/auth/callback") {
+      return authCallback(env, url, getClans(env)[0].key);
+    }
 
     if (url.pathname === "/interactions" && request.method === "POST") {
       const sig = request.headers.get("x-signature-ed25519");
@@ -428,25 +525,27 @@ export default {
     return new Response("GR0UT clan-reserves bot OK", { status: 200 });
   },
 
-  // Crons : renouvellement quotidien du token + surveillance des réserves.
+  // Crons : renouvellement quotidien des tokens + surveillance, pour chaque clan.
   async scheduled(event, env, ctx) {
-    const token = await getToken(env);
-    if (!token?.access_token) return;
+    for (const clan of getClans(env)) {
+      const token = await getToken(env, clan.key);
+      if (!token?.access_token) continue;
 
-    // Les crons fréquents (≠ 06:00) servent à repérer les réserves activables.
-    if (event.cron !== "0 6 * * *") {
-      await checkReserveSlots(env, token);
-      return;
-    }
+      // Crons fréquents (≠ 06:00) : repérer les réserves redevenues activables.
+      if (event.cron !== "0 6 * * *") {
+        await checkReserveSlots(env, clan, token);
+        continue;
+      }
 
-    // Cron quotidien : prolonge le token pour qu'il n'expire pas (~2 sem).
-    const res = await wgProlongate(env, token.access_token);
-    if (res.status === "ok" && res.data?.access_token) {
-      await saveToken(env, {
-        ...token,
-        access_token: res.data.access_token,
-        expires_at: res.data.expires_at,
-      });
+      // Cron quotidien : prolonge le token pour qu'il n'expire pas (~2 sem).
+      const res = await wgProlongate(env, token.access_token);
+      if (res.status === "ok" && res.data?.access_token) {
+        await saveToken(env, clan.key, {
+          ...token,
+          access_token: res.data.access_token,
+          expires_at: res.data.expires_at,
+        });
+      }
     }
   },
 };
