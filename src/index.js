@@ -519,7 +519,7 @@ async function sendWarGamesMessage(env) {
     body: JSON.stringify({
       content:
         `${mentions}\n🚨 **ATTENTION, CE SOIR JEUX DE GUERRE** 🚨\n` +
-        `AUCUNE RÉSERVE NE DOIT ÊTRE MISE AVANT 22H (tier 12 uniquement).`,
+        `PAS DE RÉSERVE APRÈS 20H (tier 12 uniquement).`,
       allowed_mentions: { roles: roleIds },
     }),
   });
