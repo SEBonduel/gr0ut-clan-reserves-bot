@@ -10,12 +10,12 @@ workers_dev = true
 binding = "TOKENS"
 id = "e8d3f6a1a0ab41bbbe46b8bd0ebe1cf7"
 
-# 06:00 UTC : renouvellement des tokens WG. Toutes les 30 min le soir : détection
-# des réserves qui redeviennent activables (notif Discord). Samedi 17:00 + 18:00
-# UTC : rappel "Jeux de guerre" (le code ne poste qu'à 19h heure de Paris, ce qui
-# gère automatiquement l'heure d'été/hiver).
+# 06:00 UTC : renouvellement des tokens WG. Toutes les 30 min le soir (16-22 UTC) :
+# détection des réserves activables (notif Discord) ET, le samedi, rappel "Jeux de
+# guerre" (le code ne poste qu'à 19h Paris, une seule fois : gère été/hiver et évite
+# les collisions de crons). Pas de cron dédié au rappel pour cette raison.
 [triggers]
-crons = ["0 6 * * *", "*/30 16-22 * * *", "0 17 * * 6", "0 18 * * 6"]
+crons = ["0 6 * * *", "*/30 16-22 * * *"]
 
 # Variables NON secrètes. Les secrets se posent avec `wrangler secret put NOM` :
 #   WG_APP_ID, DISCORD_PUBLIC_KEY, DISCORD_TOKEN, DISCORD_APP_ID,

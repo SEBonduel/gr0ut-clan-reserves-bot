@@ -498,9 +498,9 @@ async function checkReserveSlots(env, clan, token) {
 
 /**
  * Poste un rappel mentionnant les officiers, uniquement le samedi à 19h HEURE DE
- * PARIS. Les crons Cloudflare sont en UTC ; on déclenche à 17:00 et 18:00 UTC le
- * samedi (été/hiver) et on ne poste que si l'heure de Paris vaut bien 19h. Un
- * verrou par date (KV) évite tout doublon.
+ * PARIS. Appelé à chaque tick du cron des 30 min (16-22 UTC, qui passe à 17:00 et
+ * 18:00 = 19h Paris été/hiver) ; ne poste que si l'heure de Paris vaut bien 19h. Un
+ * verrou par date (KV) évite tout doublon (y compris le tick de 19h30).
  */
 /** Poste réellement le message (mention officiers), sans aucune garde. */
 async function sendWarGamesMessage(env) {
@@ -580,11 +580,11 @@ export default {
 
   // Crons : rappel Jeux de guerre (samedi) + renouvellement/surveillance par clan.
   async scheduled(event, env, ctx) {
-    // Rappel "Jeux de guerre" : crons du samedi 17:00/18:00 UTC (poste à 19h Paris).
-    if (event.cron === "0 17 * * 6" || event.cron === "0 18 * * 6") {
-      await maybeSendWarGamesWarning(env);
-      return;
-    }
+    // Rappel "Jeux de guerre" : vérifié à CHAQUE tick (indépendant du cron qui a
+    // déclenché, pour éviter les collisions Cloudflare quand deux crons tombent à
+    // la même minute). La fonction ne poste qu'au samedi 19h Paris, une seule fois
+    // (verrou KV). Le cron */30 16-22 couvre 17:00 et 18:00 UTC = 19h Paris été/hiver.
+    await maybeSendWarGamesWarning(env);
 
     for (const clan of getClans(env)) {
       const token = await getToken(env, clan.key);
