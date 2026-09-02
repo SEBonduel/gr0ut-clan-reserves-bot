@@ -131,9 +131,12 @@ const ephemeral = (content) =>
     data: { content, flags: InteractionResponseFlags.EPHEMERAL },
   });
 
-// OFFICER_ROLE_IDS = un ou plusieurs id de rôles séparés par des virgules.
+// Accès à la commande /reserves : officiers OU recruteurs.
+// OFFICER_ROLE_IDS + RECRUITER_ROLE_IDS = id de rôles séparés par des virgules.
+// (Le ping "Jeux de guerre" reste basé sur OFFICER_ROLE_IDS seul.)
 const isOfficer = (interaction, env) => {
-  const allowed = (env.OFFICER_ROLE_IDS || "").split(",").map((s) => s.trim());
+  const allowed = [(env.OFFICER_ROLE_IDS || ""), (env.RECRUITER_ROLE_IDS || "")]
+    .join(",").split(",").map((s) => s.trim()).filter(Boolean);
   const roles = interaction.member?.roles || [];
   return roles.some((r) => allowed.includes(r));
 };
